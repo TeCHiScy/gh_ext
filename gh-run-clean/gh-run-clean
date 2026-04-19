@@ -11,9 +11,14 @@ REPO=""
 STATUS=""
 WORKFLOW=""
 BEFORE=""
+
 LIMIT=100
 DRY_RUN=false
 FORCE=false
+KEEP_LATEST=0
+KEEP_DAYS=0
+KEYWORD=""
+RESULT=""
 
 usage() {
   cat <<EOF
@@ -28,32 +33,46 @@ FLAGS:
   -w, --workflow <name>      Filter by workflow name or filename
   -b, --before <YYYY-MM-DD>  Delete runs created before this date
   -l, --limit <number>       Max runs to fetch (default: 100, max: 500)
+  -R, --keep-latest <n>      Keep the latest n runs (do not delete)
+  -D, --keep-days <n>        Keep runs created in the last n days (do not delete)
+  -K, --keyword <kw>         Only match runs whose displayTitle or workflowName contains keyword
+  -c, --result <result>      Only match runs with result: success|failure|cancelled|skipped
   -d, --dry-run              Preview runs to be deleted without deleting
   -f, --force                Skip confirmation prompt
   -h, --help                 Show this help
   -v, --version              Show version
+
 
 EXAMPLES:
   gh run-clean -r owner/repo -s failure
   gh run-clean -r owner/repo -w build.yml -b 2026-01-01
   gh run-clean -r owner/repo -s cancelled --dry-run
   gh run-clean -r owner/repo -s completed --force
+  gh run-clean -r owner/repo -R 10
+  gh run-clean -r owner/repo -D 7
+  gh run-clean -r owner/repo -K hotfix
+  gh run-clean -r owner/repo -c success
 EOF
 }
 
 # ── Parse arguments ──
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -r|--repo)      REPO="$2"; shift 2 ;;
-    -s|--status)    STATUS="$2"; shift 2 ;;
-    -w|--workflow)  WORKFLOW="$2"; shift 2 ;;
-    -b|--before)    BEFORE="$2"; shift 2 ;;
-    -l|--limit)     LIMIT="$2"; shift 2 ;;
-    -d|--dry-run)   DRY_RUN=true; shift ;;
-    -f|--force)     FORCE=true; shift ;;
-    -h|--help)      usage; exit 0 ;;
-    -v|--version)   echo "gh-run-clean v${VERSION}"; exit 0 ;;
-    *)              echo "Unknown option: $1"; usage; exit 1 ;;
+    -r|--repo)        REPO="$2"; shift 2 ;;
+    -s|--status)      STATUS="$2"; shift 2 ;;
+    -w|--workflow)    WORKFLOW="$2"; shift 2 ;;
+    -b|--before)      BEFORE="$2"; shift 2 ;;
+    -l|--limit)       LIMIT="$2"; shift 2 ;;
+    -d|--dry-run)     DRY_RUN=true; shift ;;
+    -f|--force)       FORCE=true; shift ;;
+    -R|--keep-latest) KEEP_LATEST="$2"; shift 2 ;;
+    -D|--keep-days)   KEEP_DAYS="$2"; shift 2 ;;
+    -K|--keyword)     KEYWORD="$2"; shift 2 ;;
+    -c|--result)      RESULT="$2"; shift 2 ;;
+    -h|--help)        usage; exit 0 ;;
+    -v|--version)     echo "gh-run-clean v${VERSION}"; exit 0 ;;
+    *)                echo "Unknown option: $1"; usage; exit 1 ;;
   esac
 done
 
@@ -77,9 +96,25 @@ fi
 echo "🔍 Fetching runs from ${REPO}..."
 RUNS=$(gh "${LIST_ARGS[@]}")
 
-# ── Filter by date if --before is set ──
 if [[ -n "$BEFORE" ]]; then
   RUNS=$(echo "$RUNS" | jq --arg before "${BEFORE}T00:00:00Z" '[.[] | select(.createdAt < $before)]')
+fi
+
+if [[ -n "$RESULT" ]]; then
+  RUNS=$(echo "$RUNS" | jq --arg result "$RESULT" '[.[] | select((.conclusion // .status) == $result)]')
+fi
+
+if [[ -n "$KEYWORD" ]]; then
+  RUNS=$(echo "$RUNS" | jq --arg kw "$KEYWORD" '[.[] | select((.displayTitle // "") | test($kw; "i") or (.workflowName // "") | test($kw; "i"))]')
+fi
+
+if [[ "$KEEP_DAYS" != "0" && -n "$KEEP_DAYS" ]]; then
+  NOW=$(date -u +%s)
+  RUNS=$(echo "$RUNS" | jq --argjson days "$KEEP_DAYS" --arg now "$NOW" '[.[] | select((($now | tonumber) - ((.createdAt | sub("[TZ]"; "") | gsub("-";"/") | strptime("%Y/%m/%d %H:%M:%S") | mktime)) >= ($days*86400))) ]')
+fi
+
+if [[ "$KEEP_LATEST" != "0" && -n "$KEEP_LATEST" ]]; then
+  RUNS=$(echo "$RUNS" | jq --argjson keep "$KEEP_LATEST" 'sort_by(.createdAt) | reverse | .[$keep:]')
 fi
 
 COUNT=$(echo "$RUNS" | jq 'length')
@@ -89,7 +124,6 @@ if [[ "$COUNT" -eq 0 ]]; then
   exit 0
 fi
 
-# ── Display summary ──
 echo ""
 echo "Found ${COUNT} run(s) to delete:"
 echo "────────────────────────────────────────────────────────────"
@@ -97,13 +131,11 @@ echo "$RUNS" | jq -r '.[] | "  #\(.databaseId)  \(.conclusion // .status)\t\(.cr
 echo "────────────────────────────────────────────────────────────"
 echo ""
 
-# ── Dry run ──
 if [[ "$DRY_RUN" == true ]]; then
   echo "🏁 Dry run complete. No runs were deleted."
   exit 0
 fi
 
-# ── Confirm ──
 if [[ "$FORCE" != true ]]; then
   read -r -p "⚠️  Delete these ${COUNT} run(s)? [y/N] " confirm
   if [[ "$confirm" != [yY] ]]; then
@@ -112,7 +144,6 @@ if [[ "$FORCE" != true ]]; then
   fi
 fi
 
-# ── Delete ──
 echo ""
 DELETED=0
 FAILED=0
