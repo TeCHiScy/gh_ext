@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+
+# chmod +x run-clean.sh
+# gh extension install .
+
 set -euo pipefail
 
 VERSION="1.0.0"
